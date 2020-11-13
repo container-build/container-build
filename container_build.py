@@ -210,9 +210,8 @@ def main():
             exit(1)
 
         if opts.docker_proxy:
-            container_rootfs = container.rootfs()
             docker_proxy = DockerProxy(str(docker_proxy_path), str(docker_host.path), volumes.items(),
-                                       container_rootfs, opts.verbose)
+                                       container.rootfs, opts.verbose)
             docker_proxy.start()
 
         if not container.start(docker_start_flags=opts.docker_start_flags):
@@ -675,11 +674,11 @@ class DockerContainer:
 
 
 class DockerProxy:
-    def __init__(self, listen_path, target_host, volumes, container_rootfs, verbose):
+    def __init__(self, listen_path, target_host, volumes, container_rootfs_func, verbose):
         self.target_host = target_host
         self.server = socketserver.ThreadingUnixStreamServer(listen_path, self.handle_request)
         self.server.daemon_threads = True
-        self.container_rootfs = container_rootfs
+        self.container_rootfs_func = container_rootfs_func
         self.volumes = volumes
         self.verbose = verbose
 
@@ -697,7 +696,7 @@ class DockerProxyRequestHandler(http.server.BaseHTTPRequestHandler):
     def __init__(self, request, client_address, server, docker_proxy):
         self.__target_conn = None
         self.__target_host = docker_proxy.target_host
-        self.__container_rootfs = docker_proxy.container_rootfs
+        self.__container_rootfs_func = docker_proxy.container_rootfs_func
         self.__volumes = docker_proxy.volumes
         self.__verbose = docker_proxy.verbose
         super().__init__(request, client_address, server)
@@ -809,9 +808,9 @@ class DockerProxyRequestHandler(http.server.BaseHTTPRequestHandler):
                         new_bind_src = str(PurePath(volume_host_dir, relative_bind_src))
                         break
                 if new_bind_src is None:
-                    if self.__container_rootfs is not None:
+                    if self.__container_rootfs_func is not None:
                         relative_bind_src = PurePath(bind_src).relative_to('/')
-                        new_bind_src = str(PurePath(self.__container_rootfs, relative_bind_src))
+                        new_bind_src = str(PurePath(self.__container_rootfs_func(), relative_bind_src))
                     else:
                         new_bind_src = bind_src
                         if self.__verbose >= 1:
