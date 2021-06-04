@@ -116,6 +116,10 @@ def main():
         print(f'Error resolving mount path: {ex}', file=sys.stderr)
         exit(1)
 
+    if opts.mount_home_dir is not None and opts.mount_home_dir is not True:
+        home_dir = Path(opts.mount_home_dir).resolve()
+        volumes[str(home_dir)] = opts.home_dir
+
     if opts.docker_passthrough or opts.docker_proxy:
         docker_host = urlparse(opts.docker_host)
         if docker_host.scheme != 'unix':
@@ -156,7 +160,8 @@ def main():
         user_install_scripts=user_install_scripts,
     )
 
-    with create_dirs(opts.directory, opts.docker_proxy) as (build_dir, docker_proxy_dir):
+    with create_dirs(opts.directory, opts.docker_proxy, opts.mount_home_dir is True) as dirs:
+        (build_dir, docker_proxy_dir, home_dir) = dirs
         dockerfile_path = Path(build_dir, 'Dockerfile')
 
         try:
@@ -184,6 +189,9 @@ def main():
         if opts.docker_proxy:
             docker_proxy_path = Path(docker_proxy_dir, 'docker.sock')
             volumes[str(docker_proxy_path)] = str(docker_host.path)
+
+        if home_dir:
+            volumes[home_dir] = opts.home_dir
 
         container = create_docker_container(
             docker=opts.docker,
@@ -243,11 +251,11 @@ def collect_volumes(mount_args, work_dir, recursive):
 
 
 @contextlib.contextmanager
-def create_dirs(directory, docker_proxy):
+def create_dirs(directory, docker_proxy, mount_home_dir):
     if directory is not None:
         os.makedirs(directory, mode=0o755, exist_ok=True)
-        if not docker_proxy:
-            yield directory, None
+        if not docker_proxy and not mount_home_dir:
+            yield directory, None, None
             return
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -258,7 +266,11 @@ def create_dirs(directory, docker_proxy):
         if docker_proxy:
             docker_proxy_dir = Path(temp_dir, "docker_proxy")
             os.mkdir(docker_proxy_dir, mode=0o750)
-        yield directory, docker_proxy_dir
+        home_dir = None
+        if mount_home_dir:
+            home_dir = Path(temp_dir, "home")
+            os.mkdir(home_dir, mode=0o755)
+        yield directory, docker_proxy_dir, home_dir
 
 
 def arg_parser():
@@ -330,6 +342,10 @@ section.'''
     parser.add_argument('--work-dir',
                         help='Path of working directory to run COMMAND in the container, optionally relative to the'
                         f' home directory. Defaults to \'{DEFAULT_WORK_DIR}\'.')
+    parser.add_argument('--mount-home-dir', help='Directory to bind mount as the home directory used in the container.'
+                        ' Defaults to a temporary directory.')
+    parser.add_argument('--no-mount-home-dir', action='store_const', const=True,
+                        help='Suppress mounting a temporary directory as the home directory used in the container.')
     parser.add_argument('-m', '--mount', action='append',
                         help='Directory to bind mount under the working directory in the container. May be specified'
                         ' multiple times. Defaults to the current directory.')
@@ -570,7 +586,7 @@ class ConfigMerger:
         arg = self.get(name)
         if arg is not None:
             return arg
-        if default is None or self.get(f'no-{name}'):
+        if self.get(f'no-{name}'):
             return None
 
         if isinstance(default, list):
@@ -580,9 +596,11 @@ class ConfigMerger:
                     present.append(default_path)
             if present:
                 return present
-        else:
+        elif isinstance(default, str) or isinstance(default, bytes):
             if os.path.exists(default):
                 return default
+        else:
+            return default
 
     def get_file_list(self, name, default):
         value = self.get_file(name, default)
@@ -611,6 +629,7 @@ class Options:
         self.home_dir            = config.get('home-dir', DEFAULT_HOME_DIR)
         self.install_script      = config.get_file_list('install-script', [DEFAULT_INSTALL_SCRIPT])
         self.mount               = config.get('mount', ['.'])
+        self.mount_home_dir      = config.get_file('mount-home-dir', True)
         self.no_recursive_mount  = config.get_flag('no-recursive-mount')
         self.package             = config.get_list('package')
         self.packages_file       = config.get('packages-file', DEFAULT_PACKAGES_FILE)
