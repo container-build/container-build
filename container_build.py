@@ -20,8 +20,9 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import argparse, configparser, contextlib, tempfile, os, re, shlex, shutil, subprocess, sys
-from pathlib import Path
+import argparse, configparser, contextlib, http, http.server, json, os, re, shlex, shutil, socket, socketserver
+import subprocess, sys, tempfile, threading
+from pathlib import Path, PurePath
 from subprocess import CalledProcessError
 from urllib.parse import urlparse
 
@@ -33,7 +34,8 @@ DEFAULT_BASE_IMAGE          = 'debian:stable-slim'
 DEFAULT_CONFIG_FILE         = str(Path(CONFIG_DIRECTORY, 'build.cfg'))
 DEFAULT_DOCKER              = 'docker'
 DEFAULT_DOCKER_HOST         = 'unix:///var/run/docker.sock'
-DEFAULT_DOCKER_RUN_FLAGS    = '--interactive --tty --rm --env LC_ALL=C.UTF-8'
+DEFAULT_DOCKER_CREATE_FLAGS = '--tty --rm --env LC_ALL=C.UTF-8'
+DEFAULT_DOCKER_START_FLAGS  = '--attach --interactive'
 DEFAULT_HOME_DIR            = '/home/build'
 DEFAULT_INSTALL_SCRIPT      = str(Path(CONFIG_DIRECTORY, 'install.sh'))
 DEFAULT_PACKAGES_FILE       = str(Path(CONFIG_DIRECTORY, 'packages'))
@@ -114,13 +116,14 @@ def main():
         print(f'Error resolving mount path: {ex}', file=sys.stderr)
         exit(1)
 
+    if opts.docker_passthrough or opts.docker_proxy:
+        docker_host = urlparse(opts.docker_host)
+        if docker_host.scheme != 'unix':
+            print(f'Passthrough of daemon socket scheme \'{docker_host.scheme}\' not supported', file=sys.stderr)
+            exit(1)
+
     if opts.docker_passthrough:
         try:
-            docker_host = urlparse(opts.docker_host)
-            if docker_host.scheme != 'unix':
-                print(f'Passthrough of daemon socket scheme \'{docker_host.scheme}\' not supported', file=sys.stderr)
-                exit(1)
-
             passthrough_sock_dst = Path(docker_host.path)
             passthrough_sock_src = passthrough_sock_dst.resolve()
             volumes[str(passthrough_sock_src)] = str(passthrough_sock_dst)
@@ -153,7 +156,7 @@ def main():
         user_install_scripts=user_install_scripts,
     )
 
-    with create_build_dir(opts.directory) as build_dir:
+    with create_dirs(opts.directory, opts.docker_proxy) as (build_dir, docker_proxy_dir):
         dockerfile_path = Path(build_dir, 'Dockerfile')
 
         try:
@@ -178,9 +181,13 @@ def main():
         if not copy_build_files(build_src_dsts, build_dir, opts.verbose):
             exit(1)
 
-        run_docker_result = run_docker(
+        if opts.docker_proxy:
+            docker_proxy_path = Path(docker_proxy_dir, 'docker.sock')
+            volumes[str(docker_proxy_path)] = str(docker_host.path)
+
+        container = create_docker_container(
             docker=opts.docker,
-            docker_run_flags=opts.docker_run_flags,
+            docker_create_flags=opts.docker_create_flags,
             image_name=opts.image_name,
             build_dir=build_dir,
             dockerfile_path=dockerfile_path,
@@ -191,7 +198,16 @@ def main():
             command=opts.command,
             verbose=opts.verbose,
         )
-        if not run_docker_result:
+        if container is None:
+            exit(1)
+
+        if opts.docker_proxy:
+            container_rootfs = container.rootfs()
+            docker_proxy = DockerProxy(str(docker_proxy_path), str(docker_host.path), volumes.items(),
+                                       container_rootfs, opts.verbose)
+            docker_proxy.start()
+
+        if not container.start(docker_start_flags=opts.docker_start_flags):
             exit(1)
 
 
@@ -226,17 +242,23 @@ def collect_volumes(mount_args, work_dir, recursive):
     return volumes
 
 
-def create_build_dir(directory):
-    if directory is None:
-        return tempfile.TemporaryDirectory()
+@contextlib.contextmanager
+def create_dirs(directory, docker_proxy):
+    if directory is not None:
+        os.makedirs(directory, mode=0o755, exist_ok=True)
+        if not docker_proxy:
+            yield directory, None
+            return
 
-    os.makedirs(directory, mode=0o755, exist_ok=True)
-
-    @contextlib.contextmanager
-    def directory_contextmanager():
-        yield directory
-
-    return directory_contextmanager()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        if directory is None:
+            directory = Path(temp_dir, "build")
+            os.mkdir(directory, mode=0o755)
+        docker_proxy_dir = None
+        if docker_proxy:
+            docker_proxy_dir = Path(temp_dir, "docker_proxy")
+            os.mkdir(docker_proxy_dir, mode=0o750)
+        yield directory, docker_proxy_dir
 
 
 def arg_parser():
@@ -246,7 +268,8 @@ def arg_parser():
         epilog=f'''\
 environment variables:
   DOCKER                Path to docker executable. Defaults to '{DEFAULT_DOCKER}'.
-  DOCKER_RUN_FLAGS      Extra flags to pass to 'docker run' command. Defaults to '{DEFAULT_DOCKER_RUN_FLAGS}'.
+  DOCKER_CREATE_FLAGS   Extra flags to pass to 'docker create' command. Defaults to '{DEFAULT_DOCKER_CREATE_FLAGS}'.
+  DOCKER_START_FLAGS    Extra flags to pass to 'docker start' command. Defaults to '{DEFAULT_DOCKER_START_FLAGS}'.
   DOCKER_HOST           Docker daemon socket to connect to. Defaults to '{DEFAULT_DOCKER_HOST}'.
 
 The config file is in ini-style format and can contain any long-form command line argument or environment variable. Only
@@ -315,6 +338,9 @@ section.'''
     parser.add_argument('--docker-passthrough', action='store_const', const=True,
                         help='Mount docker unix socket from host inside container, and add user to group owning the'
                         ' socket inside the container.')
+    parser.add_argument('--docker-proxy', action='store_const', const=True,
+                        help='Make docker unix socket from host available inside container using a unix socket proxy.'
+                        ' Rewrites volume paths to refer to the container\'s filesystem.')
     parser.add_argument('-v', '--verbose', action='count',
                         help='Enable verbose output. May be specified multiple times for more verbosity.')
     return parser
@@ -433,8 +459,8 @@ def copy_build_files(src_dsts, build_dir, verbose):
     return True
 
 
-def run_docker(docker, docker_run_flags, image_name, build_dir, dockerfile_path, uid, gid, groups, volumes, command,
-               verbose):
+def create_docker_container(docker, docker_create_flags, image_name, build_dir, dockerfile_path, uid, gid, groups,
+                            volumes, command, verbose):
     try:
         docker_build_subprocess_args = {}
         docker_build_args = [
@@ -457,26 +483,28 @@ def run_docker(docker, docker_run_flags, image_name, build_dir, dockerfile_path,
         subprocess.run(docker_build_args, check=True, **docker_build_subprocess_args)
     except CalledProcessError as ex:
         print(f'docker build returned {ex.returncode}', file=sys.stderr)
-        return False
+        return None
 
     try:
-        docker_run_args = [docker, 'run']
+        docker_create_args = [docker, 'create']
         if len(groups) != 0:
-            docker_run_args.extend(['--group-add', ','.join(groups)])
-        docker_run_args.extend(shlex.split(docker_run_flags))
+            docker_create_args.extend(['--group-add', ','.join(groups)])
+        docker_create_args.extend(shlex.split(docker_create_flags))
         for (host_dir, container_dir) in volumes:
-            docker_run_args.extend(['--volume', f'{host_dir}:{container_dir}'])
-        docker_run_args.append(image_name)
-        docker_run_args.extend(command)
+            docker_create_args.extend(['--volume', f'{host_dir}:{container_dir}'])
+        docker_create_args.append(image_name)
+        docker_create_args.extend(command)
 
         if verbose >= 1:
-            print('running ' + ' '.join(docker_run_args), file=sys.stderr)
+            print('running ' + ' '.join(docker_create_args), file=sys.stderr)
 
-        subprocess.run(docker_run_args, check=True)
+        docker_create_proc = subprocess.run(docker_create_args, check=True, stdout=subprocess.PIPE)
+        container_id = str(docker_create_proc.stdout.strip(), 'ascii')
     except CalledProcessError as ex:
-        print(f'docker run returned {ex.returncode}', file=sys.stderr)
-        return False
-    return True
+        print(f'docker create returned {ex.returncode}', file=sys.stderr)
+        return None
+
+    return DockerContainer(container_id, docker, verbose)
 
 
 class ConfigSectionMissing(Exception):
@@ -575,7 +603,9 @@ class Options:
         self.docker              = config.get_env("DOCKER", DEFAULT_DOCKER)
         self.docker_host         = config.get_env('DOCKER_HOST', DEFAULT_DOCKER_HOST)
         self.docker_passthrough  = config.get_flag('docker-passthrough')
-        self.docker_run_flags    = config.get_env("DOCKER_RUN_FLAGS", DEFAULT_DOCKER_RUN_FLAGS)
+        self.docker_proxy        = config.get_flag('docker-proxy')
+        self.docker_create_flags = config.get_env('DOCKER_CREATE_FLAGS', DEFAULT_DOCKER_CREATE_FLAGS)
+        self.docker_start_flags  = config.get_env('DOCKER_START_FLAGS', DEFAULT_DOCKER_START_FLAGS)
         self.gid                 = config.get_or_else('gid', os.getegid)
         self.image_name          = config.get_or_else('name', lambda: config.config_section or infer_name())
         self.home_dir            = config.get('home-dir', DEFAULT_HOME_DIR)
@@ -590,6 +620,272 @@ class Options:
         self.shell               = config.get('shell', DEFAULT_SHELL)
         self.verbose             = int(config.get('verbose', 0))
         self.work_dir            = config.get('work-dir', DEFAULT_WORK_DIR)
+
+
+class DockerContainer:
+    def __init__(self, container_id, docker, verbose):
+        self.container_id = container_id
+        self.docker = docker
+        self.verbose = verbose
+
+    def rootfs(self):
+        try:
+            docker_inspect_args = [self.docker, 'inspect', self.container_id]
+            if self.verbose >= 1:
+                print('running ' + ' '.join(docker_inspect_args), file=sys.stderr)
+            docker_inspect_proc = subprocess.run(docker_inspect_args, check=True, stdout=subprocess.PIPE)
+            docker_inspect = json.loads(docker_inspect_proc.stdout)
+            # NB: 'MergedDir' is specific to the 'overlay' storage driver. Might want to add support for other drivers.
+            return docker_inspect[0]['GraphDriver']['Data'].get('MergedDir')
+        except CalledProcessError as ex:
+            print(f'docker inspect returned {ex.returncode}', file=sys.stderr)
+            return None
+
+    def start(self, docker_start_flags):
+        try:
+            docker_start_args = [self.docker, 'start']
+            docker_start_args.extend(shlex.split(docker_start_flags))
+            docker_start_args.append(self.container_id)
+            if self.verbose >= 1:
+                print('running ' + ' '.join(docker_start_args), file=sys.stderr)
+            subprocess.run(docker_start_args, check=True)
+        except CalledProcessError as ex:
+            print(f'docker exec returned {ex.returncode}', file=sys.stderr)
+            return False
+        return True
+
+
+class DockerProxy:
+    def __init__(self, listen_path, target_host, volumes, container_rootfs, verbose):
+        self.target_host = target_host
+        self.server = socketserver.ThreadingUnixStreamServer(listen_path, self.handle_request)
+        self.server.daemon_threads = True
+        self.container_rootfs = container_rootfs
+        self.volumes = volumes
+        self.verbose = verbose
+
+    def start(self):
+        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.server_thread.start()
+
+    def handle_request(self, request, client_address, server):
+        return DockerProxyRequestHandler(request, client_address, server, self)
+
+
+class DockerProxyRequestHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+
+    def __init__(self, request, client_address, server, docker_proxy):
+        self.__target_conn = None
+        self.__target_host = docker_proxy.target_host
+        self.__container_rootfs = docker_proxy.container_rootfs
+        self.__volumes = docker_proxy.volumes
+        self.__verbose = docker_proxy.verbose
+        super().__init__(request, client_address, server)
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def handle_one_request(self):
+        try:
+            self.raw_requestline = self.rfile.readline()
+            if not self.raw_requestline:
+                self.close_connection = True
+                return
+            if not self.parse_request():
+                return
+            self.__handle_request()
+            self.wfile.flush()
+        except (socket.timeout, ConnectionError) as ex:
+            if self.__verbose >= 2:
+                print(f'error proxying docker request: {ex}', file=sys.stderr)
+            self.close_connection = True
+
+    def __handle_request(self):
+        if self.__verbose >= 2:
+            print(f'proxying docker request: {self.command} {self.path}', file=sys.stderr)
+        request_content_iter = self.__stream_request_body()
+        request_content = self.__mangle_request(request_content_iter)
+        response = self.__proxy_request(request_content)
+        self.__write_response(response)
+
+    def __stream_request_body(self):
+        request_content_length = self.headers.get('Content-Length')
+        if request_content_length is not None:
+            return self.__stream_fixed_request_body(int(request_content_length))
+        elif self.headers.get('Transfer-Encoding', '').startswith('chunked'):
+            return self.__stream_chunked_request_body()
+        else:
+            return None
+
+    def __stream_fixed_request_body(self, content_left):
+        while content_left != 0:
+            content_chunk = self.rfile.read1(content_left)
+            if len(content_chunk) == 0:
+                raise ValueError('EOF before end of request')
+            content_left -= len(content_chunk)
+            yield content_chunk
+
+    def __stream_chunked_request_body(self):
+        while True:
+            chunk_line = str(self.rfile.readline(), 'ascii')
+            if not chunk_line.endswith('\r\n'):
+                raise ValueError('Chunk header did not end in CRLF')
+            chunk_line = chunk_line[:-2]
+
+            semicolon_index = chunk_line.find(';')
+            if semicolon_index != -1:
+                chunk_line = chunk_line[:semicolon_index]
+
+            chunk_length = int(chunk_line, base=16)
+            if chunk_length == 0:
+                break
+
+            chunk_content_left = chunk_length
+            while chunk_content_left != 0:
+                chunk_content = self.rfile.read1(chunk_content_left)
+                if len(chunk_content) == 0:
+                    raise ValueError('EOF before end of chunk')
+                chunk_content_left -= len(chunk_content)
+                yield chunk_content
+
+            if self.rfile.read(2) != b'\r\n':
+                raise ValueError('Chunk data did not end in CRLF')
+
+        while True:
+            trailer_line = str(self.rfile.readline(), 'ascii')
+            if not trailer_line.endswith('\r\n'):
+                raise ValueError('Chunked encoding trailer did not end in CRLF')
+            if len(trailer_line) == 2:
+                break
+
+    def __mangle_request(self, request_content):
+        if self.command == 'POST' and self.path.endswith('/containers/create'):
+            request_content = self.__mangle_container_create(request_content)
+        else:
+            return request_content
+
+        del self.headers['Content-Length']
+        del self.headers['Transfer-Encoding']
+        self.headers['Content-Length'] = len(request_content)
+        return [request_content]
+
+    def __mangle_container_create(self, request_content):
+        request_content = b''.join(request_content)
+        if self.__verbose >= 2:
+            print(f'mangling docker container create request: {request_content}', file=sys.stderr)
+        request_json = json.loads(request_content)
+        if 'HostConfig' in request_json and 'Binds' in request_json['HostConfig']:
+            binds = []
+            for bind in request_json['HostConfig']['Binds']:
+                bind_src, bind_dst = bind.split(':', 1)
+                new_bind_src = None
+                for volume_host_dir, volume_container_dir in self.__volumes:
+                    try:
+                        relative_bind_src = PurePath(bind_src).relative_to(volume_container_dir)
+                    except ValueError:
+                        relative_bind_src = None
+
+                    if relative_bind_src is not None:
+                        new_bind_src = str(PurePath(volume_host_dir, relative_bind_src))
+                        break
+                if new_bind_src is None:
+                    if self.__container_rootfs is not None:
+                        relative_bind_src = PurePath(bind_src).relative_to('/')
+                        new_bind_src = str(PurePath(self.__container_rootfs, relative_bind_src))
+                    else:
+                        new_bind_src = bind_src
+                        if self.__verbose >= 1:
+                            print('could not rewrite docker container create request bind as container rootfs path'
+                                  f' could not be discovered: {bind_src}', file=sys.stderr)
+                if self.__verbose >= 2 and bind_src != new_bind_src:
+                    print(f'rewriting docker container create request bind: {bind_src} -> {new_bind_src}',
+                          file=sys.stderr)
+                binds.append(':'.join([new_bind_src, bind_dst]))
+            request_json['HostConfig']['Binds'] = binds
+        return json.dumps(request_json, separators=(',', ':')).encode('utf-8')
+
+    def __proxy_request(self, request_content):
+        if self.__target_conn is None:
+            self.__target_conn = UnixSocketHTTPConnection(self.__target_host)
+        connection = self.__target_conn
+
+        connection.putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)
+        for header_name, header_value in self.headers.items():
+            connection.putheader(header_name, str(header_value))
+
+        encode_chunked = self.headers.get('Transfer-Encoding', '').startswith('chunked')
+        connection.endheaders(request_content, encode_chunked=encode_chunked)
+
+        return self.__target_conn.getresponse()
+
+    def __write_response(self, response):
+        self.send_response_only(response.code)
+        for header_name, header_value in response.getheaders():
+            self.send_header(header_name, header_value)
+        self.end_headers()
+        self.wfile.flush()
+
+        if response.chunked:
+            if self.__verbose >= 2:
+                print(f'proxying docker chunked response: {response.code} {response.getheaders()}',
+                      file=sys.stderr)
+            self.__proxy_chunked_response_body(response)
+        elif response.code == 101:
+            if self.__verbose >= 2:
+                print(f'proxied docker connection switching protocols: {response.code} {response.getheaders()}',
+                      file=sys.stderr)
+            response.length = None
+            response.will_close = True
+            self.__start_proxy_stream(response)
+        elif response.length is not None:
+            response_content = response.read()
+            if self.__verbose >= 2:
+                print(f'proxying docker response: {response.code} {response.getheaders()} {response_content}',
+                      file=sys.stderr)
+            if len(response_content) != 0:
+                self.wfile.write(response_content)
+                self.wfile.flush()
+
+    def __proxy_chunked_response_body(self, response):
+        while True:
+            content = response.read1()
+            chunk = f'{len(content):X}\r\n'.encode('ascii') + content + b'\r\n'
+            self.wfile.write(chunk)
+            self.wfile.flush()
+            if len(content) == 0:
+                break
+
+    def __start_proxy_stream(self, response):
+        reader_thread = threading.Thread(target=self.__proxy_request_stream, daemon=True)
+        reader_thread.start()
+        self.__proxy_response_stream(response)
+        reader_thread.join()
+
+    def __proxy_request_stream(self):
+        while True:
+            data = self.rfile.read1()
+            if len(data) == 0:
+                break
+            self.__target_conn.send(data)
+
+    def __proxy_response_stream(self, response):
+        while True:
+            data = response.read1()
+            if len(data) == 0:
+                break
+            self.wfile.write(data)
+            self.wfile.flush()
+
+
+class UnixSocketHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, path, **kwargs):
+        self.__path = path
+        super().__init__(path, **kwargs)
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX)
+        self.sock.connect(self.__path)
 
 
 if __name__ == '__main__':
