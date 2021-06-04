@@ -27,19 +27,20 @@ from urllib.parse import urlparse
 
 CONFIG_DIRECTORY = 'container-build'
 
-DEFAULT_APT_KEYS         = str(Path(CONFIG_DIRECTORY, 'apt-keys'))
-DEFAULT_APT_SOURCES_FILE = str(Path(CONFIG_DIRECTORY, 'sources.list'))
-DEFAULT_BASE_IMAGE       = 'debian:stretch-slim'
-DEFAULT_CONFIG_FILE      = str(Path(CONFIG_DIRECTORY, 'build.cfg'))
-DEFAULT_DOCKER           = 'docker'
-DEFAULT_DOCKER_HOST      = 'unix:///var/run/docker.sock'
-DEFAULT_DOCKER_RUN_FLAGS = '--interactive --tty --rm --env LC_ALL=C.UTF-8'
-DEFAULT_HOME_DIR         = '/home/build'
-DEFAULT_INSTALL_SCRIPT   = str(Path(CONFIG_DIRECTORY, 'install.sh'))
-DEFAULT_PACKAGES_FILE    = str(Path(CONFIG_DIRECTORY, 'packages'))
-DEFAULT_SHELL            = '/bin/bash'
-DEFAULT_USERNAME         = 'build'
-DEFAULT_WORK_DIR         = 'src'
+DEFAULT_APT_KEYS            = str(Path(CONFIG_DIRECTORY, 'apt-keys'))
+DEFAULT_APT_SOURCES_FILE    = str(Path(CONFIG_DIRECTORY, 'sources.list'))
+DEFAULT_BASE_IMAGE          = 'debian:stretch-slim'
+DEFAULT_CONFIG_FILE         = str(Path(CONFIG_DIRECTORY, 'build.cfg'))
+DEFAULT_DOCKER              = 'docker'
+DEFAULT_DOCKER_HOST         = 'unix:///var/run/docker.sock'
+DEFAULT_DOCKER_RUN_FLAGS    = '--interactive --tty --rm --env LC_ALL=C.UTF-8'
+DEFAULT_HOME_DIR            = '/home/build'
+DEFAULT_INSTALL_SCRIPT      = str(Path(CONFIG_DIRECTORY, 'install.sh'))
+DEFAULT_PACKAGES_FILE       = str(Path(CONFIG_DIRECTORY, 'packages'))
+DEFAULT_SHELL               = '/bin/bash'
+DEFAULT_USERNAME            = 'build'
+DEFAULT_USER_INSTALL_SCRIPT = str(Path(CONFIG_DIRECTORY, 'user_install.sh'))
+DEFAULT_WORK_DIR            = 'src'
 
 SCRIPTS_DIR = 'scripts'
 APT_KEYS_DIR = 'apt-keys'
@@ -91,6 +92,12 @@ def main():
         install_script_name = Path(install_script_src).name
         install_scripts.append(Path(SCRIPTS_DIR, f'{install_script_index}_{install_script_name}'))
 
+    user_install_scripts_src = opts.user_install_script
+    user_install_scripts = []
+    for (user_install_script_index, user_install_script_src) in enumerate(user_install_scripts_src or []):
+        user_install_script_name = Path(user_install_script_src).name
+        user_install_scripts.append(Path(SCRIPTS_DIR, f'{user_install_script_index}_{user_install_script_name}'))
+
     work_dir = str(Path(opts.home_dir, opts.work_dir))
 
     groups = []
@@ -141,6 +148,7 @@ def main():
         apt_keys=apt_keys,
         packages=packages,
         install_scripts=install_scripts,
+        user_install_scripts=user_install_scripts,
     )
 
     with create_build_dir(opts.directory) as build_dir:
@@ -163,6 +171,8 @@ def main():
             build_src_dsts.extend(zip(apt_keys_src, apt_keys))
         if install_scripts_src is not None:
             build_src_dsts.extend(zip(install_scripts_src, install_scripts))
+        if user_install_scripts_src is not None:
+            build_src_dsts.extend(zip(user_install_scripts_src, user_install_scripts))
         if not copy_build_files(build_src_dsts, build_dir, opts.verbose):
             exit(1)
 
@@ -259,6 +269,11 @@ section.'''
                         f' multiple times. Defaults to \'{DEFAULT_INSTALL_SCRIPT}\', if it exists.')
     parser.add_argument('--no-install-script', action='store_const', const=True,
                         help=f'Suppress using the default install script path \'{DEFAULT_INSTALL_SCRIPT}\'.')
+    parser.add_argument('--user-install-script', action='append',
+                        help='Path of extra script to run as build user in container during image creation. May be specified'
+                        f' multiple times. Defaults to \'{DEFAULT_USER_INSTALL_SCRIPT}\', if it exists.')
+    parser.add_argument('--no-user-install-script', action='store_const', const=True,
+                        help=f'Suppress using the default user install script path \'{DEFAULT_USER_INSTALL_SCRIPT}\'.')
     parser.add_argument('--base-image',
                         help=f'Base image to derive the container from. Defaults to \'{DEFAULT_BASE_IMAGE}\'.')
     parser.add_argument('-p', '--package', action='append',
@@ -304,7 +319,7 @@ section.'''
 
 
 def generate_dockerfile(base_image, username, home_dir, shell, work_dir, apt_sources, apt_keys, packages,
-                        install_scripts):
+                        install_scripts, user_install_scripts):
     pre_packages = []
     if apt_sources:
         pre_packages.append('apt-transport-https')
@@ -385,6 +400,18 @@ ENV HOME {home_dir}
 ENV USER {username}
 WORKDIR {work_dir}
 
+'''
+
+    for user_install_script_str in user_install_scripts or []:
+        user_install_script = Path(user_install_script_str)
+        dockerfile += f'''\
+COPY --chown=${{UID}}:${{GID}} [ "{user_install_script}", "/tmp/build/{user_install_script.name}" ]
+RUN    '/tmp/build/{user_install_script.name}' \\
+    && rm -rf /tmp/build
+
+'''
+
+    dockerfile += f'''\
 CMD [ "{shell}" ]
 '''
     return dockerfile
@@ -538,28 +565,29 @@ class ConfigMerger:
 
 class Options:
     def __init__(self, config):
-        self.apt_keys           = config.get_file('apt-keys', DEFAULT_APT_KEYS)
-        self.apt_sources_file   = config.get_file('apt-sources-file', DEFAULT_APT_SOURCES_FILE)
-        self.base_image         = config.get('base-image', DEFAULT_BASE_IMAGE)
-        self.command            = config.get('command')
-        self.directory          = config.get('directory')
-        self.docker             = config.get_env("DOCKER", DEFAULT_DOCKER)
-        self.docker_host        = config.get_env('DOCKER_HOST', DEFAULT_DOCKER_HOST)
-        self.docker_passthrough = config.get_flag('docker-passthrough')
-        self.docker_run_flags   = config.get_env("DOCKER_RUN_FLAGS", DEFAULT_DOCKER_RUN_FLAGS)
-        self.gid                = config.get_or_else('gid', os.getegid)
-        self.image_name         = config.get_or_else('name', lambda: config.config_section or infer_name())
-        self.home_dir           = config.get('home-dir', DEFAULT_HOME_DIR)
-        self.install_script     = config.get_file_list('install-script', [DEFAULT_INSTALL_SCRIPT])
-        self.mount              = config.get('mount', ['.'])
-        self.no_recursive_mount = config.get_flag('no-recursive-mount')
-        self.package            = config.get_list('package')
-        self.packages_file      = config.get('packages-file', DEFAULT_PACKAGES_FILE)
-        self.uid                = config.get_or_else('uid', os.geteuid)
-        self.username           = config.get('username', DEFAULT_USERNAME)
-        self.shell              = config.get('shell', DEFAULT_SHELL)
-        self.verbose            = int(config.get('verbose', 0))
-        self.work_dir           = config.get('work-dir', DEFAULT_WORK_DIR)
+        self.apt_keys            = config.get_file('apt-keys', DEFAULT_APT_KEYS)
+        self.apt_sources_file    = config.get_file('apt-sources-file', DEFAULT_APT_SOURCES_FILE)
+        self.base_image          = config.get('base-image', DEFAULT_BASE_IMAGE)
+        self.command             = config.get('command')
+        self.directory           = config.get('directory')
+        self.docker              = config.get_env("DOCKER", DEFAULT_DOCKER)
+        self.docker_host         = config.get_env('DOCKER_HOST', DEFAULT_DOCKER_HOST)
+        self.docker_passthrough  = config.get_flag('docker-passthrough')
+        self.docker_run_flags    = config.get_env("DOCKER_RUN_FLAGS", DEFAULT_DOCKER_RUN_FLAGS)
+        self.gid                 = config.get_or_else('gid', os.getegid)
+        self.image_name          = config.get_or_else('name', lambda: config.config_section or infer_name())
+        self.home_dir            = config.get('home-dir', DEFAULT_HOME_DIR)
+        self.install_script      = config.get_file_list('install-script', [DEFAULT_INSTALL_SCRIPT])
+        self.mount               = config.get('mount', ['.'])
+        self.no_recursive_mount  = config.get_flag('no-recursive-mount')
+        self.package             = config.get_list('package')
+        self.packages_file       = config.get('packages-file', DEFAULT_PACKAGES_FILE)
+        self.uid                 = config.get_or_else('uid', os.geteuid)
+        self.username            = config.get('username', DEFAULT_USERNAME)
+        self.user_install_script = config.get_file_list('user-install-script', [DEFAULT_USER_INSTALL_SCRIPT])
+        self.shell               = config.get('shell', DEFAULT_SHELL)
+        self.verbose             = int(config.get('verbose', 0))
+        self.work_dir            = config.get('work-dir', DEFAULT_WORK_DIR)
 
 
 if __name__ == '__main__':

@@ -13,6 +13,7 @@ configuration files automatically detected under the current working directory t
   * `container-bulid/apt-keys/*.gpg` will be added to the `apt` trusted gpg key database in the container.
   * `container-build/packages` specifies packages to be installed in the container, one per line.
   * `container-build/install.sh` will be run as root while building the container image, after package installation.
+  * `container-build/user_install.sh` will be run as the build user while building the container image, as a final step.
 
 ## Running
 
