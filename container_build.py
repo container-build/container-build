@@ -47,7 +47,11 @@ APT_KEYS_DIR = 'apt-keys'
 
 def main():
     args = arg_parser().parse_args()
-    config = ConfigMerger(args)
+    try:
+        config = ConfigMerger(args)
+    except ConfigSectionMissing as ex:
+        print(f'Specified section missing in config file: \'{ex}\'')
+
     opts = Options(config)
 
     if opts.verbose >= 1 and config.config_file is not None:
@@ -243,6 +247,8 @@ section.'''
                         help=f'Path of config file. Defaults to \'{DEFAULT_CONFIG_FILE}\', if it exists.')
     parser.add_argument('--no-config-file',
                         help=f'Suppress using default config file path \'{DEFAULT_CONFIG_FILE}\'.')
+    parser.add_argument('-s', '--config-section',
+                        help='Section of config file to use. Defaults to the first section in the config file.')
     parser.add_argument('-n', '--name',
                         help='Name of generated container image. Defaults to the name of the current working'
                         ' directory suffixed with \'-builder\'.')
@@ -444,16 +450,26 @@ def run_docker(docker, docker_run_flags, image_name, build_dir, dockerfile_path,
     return True
 
 
+class ConfigSectionMissing(Exception):
+    pass
+
+
 class ConfigMerger:
     def __init__(self, args):
         self.args = args
         self.config = None
+        self.config_section = None
 
         self.config_file = self.get_file('config-file', DEFAULT_CONFIG_FILE)
         if self.config_file is not None:
             config = configparser.ConfigParser(allow_no_value=True)
             config.read(self.config_file)
-            if len(config.sections()) != 0:
+            if args.config_section is not None:
+                if args.config_section not in config.sections():
+                    raise ConfigSectionMissing(args.config_section)
+                self.config = config
+                self.config_section = args.config_section
+            elif len(config.sections()) != 0:
                 self.config = config
                 self.config_section = config.sections()[0]
 
