@@ -524,7 +524,7 @@ class Options:
         self.docker_passthrough = config.get_flag('docker-passthrough')
         self.docker_run_flags   = config.get_env("DOCKER_RUN_FLAGS", DEFAULT_DOCKER_RUN_FLAGS)
         self.gid                = config.get_or_else('gid', os.getegid)
-        self.image_name         = config.get_or_else('name', infer_name)
+        self.image_name         = config.get_or_else('name', lambda: config.config_section or infer_name())
         self.home_dir           = config.get('home-dir', DEFAULT_HOME_DIR)
         self.install_script     = config.get_file('install-script', [DEFAULT_INSTALL_SCRIPT])
         self.mount              = config.get('mount', ['.'])
