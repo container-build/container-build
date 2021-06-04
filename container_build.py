@@ -70,6 +70,8 @@ def main():
                 if package:
                     packages.append(package)
 
+    packages = sorted(packages)
+
     apt_sources_src = opts.apt_sources_file
     if opts.apt_sources_file is not None:
         apt_sources = Path(opts.apt_sources_file).name
@@ -79,7 +81,7 @@ def main():
     if opts.apt_keys is not None:
         apt_keys_src = []
         apt_keys = []
-        for apt_key_name in os.listdir(opts.apt_keys):
+        for apt_key_name in sorted(os.listdir(opts.apt_keys)):
             apt_keys_src.append(Path(opts.apt_keys, apt_key_name))
             apt_keys.append(Path(APT_KEYS_DIR, apt_key_name))
     else:
