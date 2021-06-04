@@ -527,6 +527,14 @@ class ConfigMerger:
             if os.path.exists(default):
                 return default
 
+    def get_file_list(self, name, default):
+        value = self.get_file(name, default)
+        if isinstance(value, list):
+            return value
+        if value is not None:
+            return [value]
+        return []
+
 
 class Options:
     def __init__(self, config):
@@ -542,7 +550,7 @@ class Options:
         self.gid                = config.get_or_else('gid', os.getegid)
         self.image_name         = config.get_or_else('name', lambda: config.config_section or infer_name())
         self.home_dir           = config.get('home-dir', DEFAULT_HOME_DIR)
-        self.install_script     = config.get_file('install-script', [DEFAULT_INSTALL_SCRIPT])
+        self.install_script     = config.get_file_list('install-script', [DEFAULT_INSTALL_SCRIPT])
         self.mount              = config.get('mount', ['.'])
         self.no_recursive_mount = config.get_flag('no-recursive-mount')
         self.package            = config.get_list('package')
