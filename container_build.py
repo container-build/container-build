@@ -29,6 +29,7 @@ from urllib.parse import urlparse
 CONFIG_DIRECTORY = 'container-build'
 
 DEFAULT_APT_KEYS            = str(Path(CONFIG_DIRECTORY, 'apt-keys'))
+DEFAULT_APT_CONF_FILE       = str(Path(CONFIG_DIRECTORY, 'apt.conf'))
 DEFAULT_APT_SOURCES_FILE    = str(Path(CONFIG_DIRECTORY, 'sources.list'))
 DEFAULT_BASE_IMAGE          = 'debian:stable-slim'
 DEFAULT_CONFIG_FILE         = str(Path(CONFIG_DIRECTORY, 'build.cfg'))
@@ -79,6 +80,12 @@ def main():
         apt_sources = Path(opts.apt_sources_file).name
     else:
         apt_sources = None
+
+    apt_conf_src = opts.apt_conf_file
+    if opts.apt_conf_file is not None:
+        apt_conf = Path(opts.apt_conf_file).name
+    else:
+        apt_conf = None
 
     if opts.apt_keys is not None:
         apt_keys_src = []
@@ -153,6 +160,7 @@ def main():
         home_dir=opts.home_dir,
         shell=opts.shell,
         work_dir=work_dir,
+        apt_conf=apt_conf,
         apt_sources=apt_sources,
         apt_keys=apt_keys,
         packages=packages,
@@ -177,6 +185,8 @@ def main():
         build_src_dsts = []
         if apt_sources_src is not None:
             build_src_dsts.append((apt_sources_src, apt_sources))
+        if apt_conf_src is not None:
+            build_src_dsts.append((apt_conf_src, apt_conf))
         if apt_keys_src is not None:
             build_src_dsts.extend(zip(apt_keys_src, apt_keys))
         if install_scripts_src is not None:
@@ -318,6 +328,11 @@ section.'''
     parser.add_argument('--packages-file',
                         help='Path of file containing apt package specifications to install in the container. Defaults'
                         f' to \'{DEFAULT_PACKAGES_FILE}\'.')
+    parser.add_argument('--apt-conf-file',
+                        help='Path of apt.conf to use during package installation in the container. Defaults to'
+                        f' \'{DEFAULT_APT_CONF_FILE}\', if it exists.')
+    parser.add_argument('--no-apt-conf-file', action='store_const', const=True,
+                        help=f'Suppress using the default apt.conf path \'{DEFAULT_APT_CONF_FILE}\'.')
     parser.add_argument('--apt-sources-file',
                         help='Path of apt sources.list to use during package installation in the container. Defaults to'
                         f' \'{DEFAULT_APT_SOURCES_FILE}\', if it exists.')
@@ -361,7 +376,7 @@ section.'''
     return parser
 
 
-def generate_dockerfile(base_image, username, home_dir, shell, work_dir, apt_sources, apt_keys, packages,
+def generate_dockerfile(base_image, username, home_dir, shell, work_dir, apt_conf, apt_sources, apt_keys, packages,
                         install_scripts, user_install_scripts):
     pre_packages = []
     if apt_sources:
@@ -408,10 +423,16 @@ RUN    apt-get update \\
 
 '''
 
+    if apt_conf:
+        apt_conf_path = Path(apt_conf)
+        dockerfile += f'''\
+COPY [ "{apt_conf_path}", "/etc/apt/apt.conf.d/99container-build.conf" ]
+
+'''
     if apt_sources:
         apt_sources_path = Path(apt_sources)
         dockerfile += f'''\
-COPY [ "{apt_sources_path}", "/etc/apt/sources.list.d/build.list" ]
+COPY [ "{apt_sources_path}", "/etc/apt/sources.list.d/container-build.list" ]
 
 '''
 
@@ -613,6 +634,7 @@ class ConfigMerger:
 class Options:
     def __init__(self, config):
         self.apt_keys            = config.get_file('apt-keys', DEFAULT_APT_KEYS)
+        self.apt_conf_file       = config.get_file('apt-conf-file', DEFAULT_APT_CONF_FILE)
         self.apt_sources_file    = config.get_file('apt-sources-file', DEFAULT_APT_SOURCES_FILE)
         self.base_image          = config.get('base-image', DEFAULT_BASE_IMAGE)
         self.command             = config.get('command')
