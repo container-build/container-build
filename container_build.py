@@ -29,7 +29,7 @@ CONFIG_DIRECTORY = 'container-build'
 
 DEFAULT_APT_KEYS            = str(Path(CONFIG_DIRECTORY, 'apt-keys'))
 DEFAULT_APT_SOURCES_FILE    = str(Path(CONFIG_DIRECTORY, 'sources.list'))
-DEFAULT_BASE_IMAGE          = 'debian:stretch-slim'
+DEFAULT_BASE_IMAGE          = 'debian:stable-slim'
 DEFAULT_CONFIG_FILE         = str(Path(CONFIG_DIRECTORY, 'build.cfg'))
 DEFAULT_DOCKER              = 'docker'
 DEFAULT_DOCKER_HOST         = 'unix:///var/run/docker.sock'
