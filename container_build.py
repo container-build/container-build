@@ -312,7 +312,7 @@ def generate_dockerfile(base_image, username, home_dir, shell, work_dir, apt_sou
         pre_packages.extend(['gnupg', 'software-properties-common'])
 
     apt_keys_dst = []
-    for apt_key in apt_keys:
+    for apt_key in apt_keys or []:
         apt_keys_dst.append(f'/tmp/build/{apt_key}')
 
     dockerfile = f'''\
