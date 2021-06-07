@@ -35,7 +35,7 @@ DEFAULT_BASE_IMAGE          = 'debian:stable-slim'
 DEFAULT_CONFIG_FILE         = str(Path(CONFIG_DIRECTORY, 'build.cfg'))
 DEFAULT_DOCKER              = 'docker'
 DEFAULT_DOCKER_HOST         = 'unix:///var/run/docker.sock'
-DEFAULT_DOCKER_CREATE_FLAGS = '--tty --rm --env LC_ALL=C.UTF-8'
+DEFAULT_DOCKER_CREATE_FLAGS = '--tty --interactive --rm --env LC_ALL=C.UTF-8'
 DEFAULT_DOCKER_START_FLAGS  = '--attach --interactive'
 DEFAULT_HOME_DIR            = '/home/build'
 DEFAULT_INSTALL_SCRIPT      = str(Path(CONFIG_DIRECTORY, 'install.sh'))
