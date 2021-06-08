@@ -65,12 +65,7 @@ def main():
         print(f'Error opening packages file \'{opts.packages_file}\': {ex}', file=sys.stderr)
         exit(1)
 
-    if opts.package:
-        for package_arg in opts.package:
-            for package in re.split(r'\s+', package_arg):
-                if package:
-                    packages.append(package)
-
+    packages.extend(opts.package)
     packages = sorted(packages)
 
     apt_sources_src = opts.apt_sources_file
@@ -575,7 +570,7 @@ class ConfigMerger:
 
         self.config_file = self.get_file('config-file', DEFAULT_CONFIG_FILE)
         if self.config_file is not None:
-            config = configparser.ConfigParser(allow_no_value=True)
+            config = configparser.ConfigParser(allow_no_value=True, strict=True)
             config.read(self.config_file)
             if args.config_section is not None:
                 if args.config_section not in config.sections():
@@ -608,13 +603,30 @@ class ConfigMerger:
             return value
         return value is not None
 
-    def get_list(self, name):
-        value = self.get(name, default=[])
-        if isinstance(value, list):
-            return value
-        if value is not None:
-            return [value]
-        return []
+    def get_list(self, name, default=[], delimiter="\n"):
+        unsplit_values = []
+
+        if self.config is not None:
+            if self.config.has_option(self.config_section, name):
+                config_value = self.config.get(self.config_section, name)
+                if config_value is not None:
+                    unsplit_values.append(config_value)
+
+        arg = getattr(self.args, name.replace('-', '_'), None)
+        if isinstance(arg, list):
+            unsplit_values.extend(arg)
+        elif arg is not None:
+            unsplit_values.append(arg)
+
+        if len(unsplit_values) == 0:
+            return default
+
+        values = []
+        for unsplit_value in unsplit_values:
+            for value in re.split(delimiter, unsplit_value):
+                if value:
+                    values.append(value)
+        return values
 
     def get_env(self, name, default=None):
         env = os.getenv(name)
@@ -670,11 +682,11 @@ class Options:
         self.image_name          = config.get_or_else('name', lambda: config.config_section or infer_name())
         self.home_dir            = config.get('home-dir')
         self.install_script      = config.get_file_list('install-script', [DEFAULT_INSTALL_SCRIPT])
-        self.mount               = config.get('mount', ['.'])
+        self.mount               = config.get_list('mount', default=['.'])
         self.mount_home_dir      = config.get_file('mount-home-dir', True)
         self.no_recursive_mount  = config.get_flag('no-recursive-mount')
         self.no_tty              = config.get_flag('no-tty')
-        self.package             = config.get_list('package')
+        self.package             = config.get_list('package', delimiter=r'\s+')
         self.packages_file       = config.get('packages-file', DEFAULT_PACKAGES_FILE)
         self.uid                 = config.get_or_else('uid', os.geteuid)
         self.username            = config.get('username', DEFAULT_USERNAME)
