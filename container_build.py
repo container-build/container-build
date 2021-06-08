@@ -458,7 +458,7 @@ RUN    '/tmp/build/{install_script.name}' \\
     dockerfile += f'''\
 # Create a user to map the host user to.
 RUN    groupadd -o -g ${{GID}} '{username}' \\
-    && useradd -m -o -u ${{UID}} -g ${{GID}} -s '{shell}' '{username}'
+    && useradd -m -o -u ${{UID}} -g ${{GID}} -s '{shell}' -d '{home_dir}' '{username}'
 USER {username}
 ENV HOME {home_dir}
 ENV USER {username}
