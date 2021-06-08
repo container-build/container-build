@@ -35,7 +35,7 @@ DEFAULT_BASE_IMAGE          = 'debian:stable-slim'
 DEFAULT_CONFIG_FILE         = str(Path(CONFIG_DIRECTORY, 'build.cfg'))
 DEFAULT_DOCKER              = 'docker'
 DEFAULT_DOCKER_HOST         = 'unix:///var/run/docker.sock'
-DEFAULT_DOCKER_CREATE_FLAGS = '--tty --interactive --rm --env LC_ALL=C.UTF-8'
+DEFAULT_DOCKER_CREATE_FLAGS = '--tty --interactive --rm'
 DEFAULT_DOCKER_START_FLAGS  = '--attach --interactive'
 DEFAULT_HOME_DIR_PREFIX     = '/home/'
 DEFAULT_INSTALL_SCRIPT      = str(Path(CONFIG_DIRECTORY, 'install.sh'))
@@ -160,6 +160,7 @@ def main():
         home_dir=opts.home_dir,
         shell=opts.shell,
         work_dir=work_dir,
+        env=opts.env,
         apt_conf=apt_conf,
         apt_sources=apt_sources,
         apt_keys=apt_keys,
@@ -357,6 +358,9 @@ section.'''
     parser.add_argument('--work-dir',
                         help='Path of working directory to run COMMAND in the container, optionally relative to the'
                         f' home directory. Defaults to \'{DEFAULT_WORK_DIR}\'.')
+    parser.add_argument('--env', action='append', metavar='NAME=VALUE',
+                        help='Sets a variable in the environment used to run COMMAND in the container. May be specified'
+                        f' multiple times.')
     parser.add_argument('--mount-home-dir', help='Directory to bind mount as the home directory used in the container.'
                         ' Defaults to a temporary directory.')
     parser.add_argument('--no-mount-home-dir', action='store_const', const=True,
@@ -377,7 +381,7 @@ section.'''
     return parser
 
 
-def generate_dockerfile(base_image, username, home_dir, shell, work_dir, apt_conf, apt_sources, apt_keys, packages,
+def generate_dockerfile(base_image, username, home_dir, shell, work_dir, env, apt_conf, apt_sources, apt_keys, packages,
                         install_scripts, user_install_scripts):
     pre_packages = []
     if apt_sources:
@@ -463,6 +467,7 @@ RUN    groupadd -o -g ${{GID}} '{username}' \\
 USER {username}
 ENV HOME {home_dir}
 ENV USER {username}
+ENV LC_ALL C.UTF-8
 WORKDIR {work_dir}
 
 '''
@@ -474,6 +479,17 @@ COPY --chown=${{UID}}:${{GID}} [ "{user_install_script}", "/tmp/build/{user_inst
 RUN    '/tmp/build/{user_install_script.name}' \\
     && rm -rf /tmp/build
 
+'''
+
+    for env_var in env:
+        env_var_name, env_var_value = env_var.split('=', 1)
+        if env_var_value:
+            dockerfile += f'''\
+ENV {env_var_name} {env_var_value}
+'''
+        else:
+            dockerfile += f'''\
+ENV {env_var_name}=""
 '''
 
     dockerfile += f'''\
@@ -646,6 +662,7 @@ class Options:
         self.docker_proxy        = config.get_flag('docker-proxy')
         self.docker_create_flags = config.get_env('DOCKER_CREATE_FLAGS', DEFAULT_DOCKER_CREATE_FLAGS)
         self.docker_start_flags  = config.get_env('DOCKER_START_FLAGS', DEFAULT_DOCKER_START_FLAGS)
+        self.env                 = config.get_list('env')
         self.gid                 = config.get_or_else('gid', os.getegid)
         self.image_name          = config.get_or_else('name', lambda: config.config_section or infer_name())
         self.home_dir            = config.get('home-dir')
