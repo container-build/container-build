@@ -406,8 +406,8 @@ COPY [ "{APT_KEYS_DIR}", "/tmp/build/{APT_KEYS_DIR}" ]
     if pre_packages:
         pre_package_args = ' \\\n       '.join(pre_packages)
         dockerfile += f'''\
-RUN    apt-get update \\
-    && apt-get install --no-install-recommends -y \\
+RUN    for retry in {{0..10}}; do apt-get update && break; done \\
+    && apt-get install --no-install-recommends -y -o APT::Acquire::Retries=10 \\
        {pre_package_args} \\
 '''
     if apt_keys:
@@ -440,8 +440,8 @@ COPY [ "{apt_sources_path}", "/etc/apt/sources.list.d/container-build.list" ]
     if packages:
         package_args = ' \\\n       '.join(packages)
         dockerfile += f'''\
-RUN    apt-get update \\
-    && apt-get install --no-install-recommends -y \\
+RUN    for retry in {{0..10}}; do apt-get update && break; done \\
+    && apt-get install --no-install-recommends -y -o APT::Acquire::Retries=10 \\
        {package_args} \\
     && rm -rf /var/lib/apt/lists/*
 
