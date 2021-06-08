@@ -211,6 +211,7 @@ def main():
             uid=opts.uid,
             gid=opts.gid,
             groups=groups,
+            tty=not opts.no_tty,
             volumes=volumes.items(),
             command=opts.command,
             verbose=opts.verbose,
@@ -359,6 +360,8 @@ section.'''
     parser.add_argument('--env', action='append', metavar='NAME=VALUE',
                         help='Sets a variable in the environment used to run COMMAND in the container. May be specified'
                         f' multiple times.')
+    parser.add_argument('--no-tty', action='store_const', const=True,
+                        help='Suppress allocating a tty to run COMMAND in the container.')
     parser.add_argument('--mount-home-dir', help='Directory to bind mount as the home directory used in the container.'
                         ' Defaults to a temporary directory.')
     parser.add_argument('--no-mount-home-dir', action='store_const', const=True,
@@ -511,7 +514,7 @@ def copy_build_files(src_dsts, build_dir, verbose):
 
 
 def create_docker_container(docker, docker_create_flags, image_name, build_dir, dockerfile_path, uid, gid, groups,
-                            volumes, command, verbose):
+                            tty, volumes, command, verbose):
     try:
         docker_build_subprocess_args = {}
         docker_build_args = [
@@ -537,7 +540,9 @@ def create_docker_container(docker, docker_create_flags, image_name, build_dir, 
         return None
 
     try:
-        docker_create_args = [docker, 'create', '--tty', '--interactive', '--rm']
+        docker_create_args = [docker, 'create', '--interactive', '--rm']
+        if tty:
+            docker_create_args.append('--tty')
         if len(groups) != 0:
             docker_create_args.extend(['--group-add', ','.join(groups)])
         docker_create_args.extend(shlex.split(docker_create_flags))
@@ -668,6 +673,7 @@ class Options:
         self.mount               = config.get('mount', ['.'])
         self.mount_home_dir      = config.get_file('mount-home-dir', True)
         self.no_recursive_mount  = config.get_flag('no-recursive-mount')
+        self.no_tty              = config.get_flag('no-tty')
         self.package             = config.get_list('package')
         self.packages_file       = config.get('packages-file', DEFAULT_PACKAGES_FILE)
         self.uid                 = config.get_or_else('uid', os.geteuid)
