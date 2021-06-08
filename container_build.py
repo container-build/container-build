@@ -35,8 +35,6 @@ DEFAULT_BASE_IMAGE          = 'debian:stable-slim'
 DEFAULT_CONFIG_FILE         = str(Path(CONFIG_DIRECTORY, 'build.cfg'))
 DEFAULT_DOCKER              = 'docker'
 DEFAULT_DOCKER_HOST         = 'unix:///var/run/docker.sock'
-DEFAULT_DOCKER_CREATE_FLAGS = '--tty --interactive --rm'
-DEFAULT_DOCKER_START_FLAGS  = '--attach --interactive'
 DEFAULT_HOME_DIR_PREFIX     = '/home/'
 DEFAULT_INSTALL_SCRIPT      = str(Path(CONFIG_DIRECTORY, 'install.sh'))
 DEFAULT_PACKAGES_FILE       = str(Path(CONFIG_DIRECTORY, 'packages'))
@@ -290,8 +288,8 @@ def arg_parser():
         epilog=f'''\
 environment variables:
   DOCKER                Path to docker executable. Defaults to '{DEFAULT_DOCKER}'.
-  DOCKER_CREATE_FLAGS   Extra flags to pass to 'docker create' command. Defaults to '{DEFAULT_DOCKER_CREATE_FLAGS}'.
-  DOCKER_START_FLAGS    Extra flags to pass to 'docker start' command. Defaults to '{DEFAULT_DOCKER_START_FLAGS}'.
+  DOCKER_CREATE_FLAGS   Extra flags to pass to 'docker create' command.
+  DOCKER_START_FLAGS    Extra flags to pass to 'docker start' command.
   DOCKER_HOST           Docker daemon socket to connect to. Defaults to '{DEFAULT_DOCKER_HOST}'.
 
 The config file is in ini-style format and can contain any long-form command line argument or environment variable. Only
@@ -539,7 +537,7 @@ def create_docker_container(docker, docker_create_flags, image_name, build_dir, 
         return None
 
     try:
-        docker_create_args = [docker, 'create']
+        docker_create_args = [docker, 'create', '--tty', '--interactive', '--rm']
         if len(groups) != 0:
             docker_create_args.extend(['--group-add', ','.join(groups)])
         docker_create_args.extend(shlex.split(docker_create_flags))
@@ -660,8 +658,8 @@ class Options:
         self.docker_host         = config.get_env('DOCKER_HOST', DEFAULT_DOCKER_HOST)
         self.docker_passthrough  = config.get_flag('docker-passthrough')
         self.docker_proxy        = config.get_flag('docker-proxy')
-        self.docker_create_flags = config.get_env('DOCKER_CREATE_FLAGS', DEFAULT_DOCKER_CREATE_FLAGS)
-        self.docker_start_flags  = config.get_env('DOCKER_START_FLAGS', DEFAULT_DOCKER_START_FLAGS)
+        self.docker_create_flags = config.get_env('DOCKER_CREATE_FLAGS', '')
+        self.docker_start_flags  = config.get_env('DOCKER_START_FLAGS', '')
         self.env                 = config.get_list('env')
         self.gid                 = config.get_or_else('gid', os.getegid)
         self.image_name          = config.get_or_else('name', lambda: config.config_section or infer_name())
@@ -704,7 +702,7 @@ class DockerContainer:
 
     def start(self, docker_start_flags):
         try:
-            docker_start_args = [self.docker, 'start']
+            docker_start_args = [self.docker, 'start', '--attach', '--interactive']
             docker_start_args.extend(shlex.split(docker_start_flags))
             docker_start_args.append(self.container_id)
             if self.verbose >= 1:
