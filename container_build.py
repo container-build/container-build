@@ -37,7 +37,7 @@ DEFAULT_DOCKER              = 'docker'
 DEFAULT_DOCKER_HOST         = 'unix:///var/run/docker.sock'
 DEFAULT_DOCKER_CREATE_FLAGS = '--tty --interactive --rm --env LC_ALL=C.UTF-8'
 DEFAULT_DOCKER_START_FLAGS  = '--attach --interactive'
-DEFAULT_HOME_DIR            = '/home/build'
+DEFAULT_HOME_DIR_PREFIX     = '/home/'
 DEFAULT_INSTALL_SCRIPT      = str(Path(CONFIG_DIRECTORY, 'install.sh'))
 DEFAULT_PACKAGES_FILE       = str(Path(CONFIG_DIRECTORY, 'packages'))
 DEFAULT_SHELL               = '/bin/bash'
@@ -350,7 +350,8 @@ section.'''
     parser.add_argument('--username',
                         help=f'Username used to run COMMAND in the container. Defaults to \'{DEFAULT_USERNAME}\'.')
     parser.add_argument('--home-dir',
-                        help=f'Path of home directory used in the container. Defaults to \'{DEFAULT_HOME_DIR}\'.')
+                        help='Path of home directory used in the container. Defaults to'
+                        f' \'{DEFAULT_HOME_DIR_PREFIX}$USERNAME\'.')
     parser.add_argument('--shell',
                         help=f'Path of shell used to run COMMAND in the container. Defaults to \'{DEFAULT_SHELL}\'.')
     parser.add_argument('--work-dir',
@@ -647,7 +648,7 @@ class Options:
         self.docker_start_flags  = config.get_env('DOCKER_START_FLAGS', DEFAULT_DOCKER_START_FLAGS)
         self.gid                 = config.get_or_else('gid', os.getegid)
         self.image_name          = config.get_or_else('name', lambda: config.config_section or infer_name())
-        self.home_dir            = config.get('home-dir', DEFAULT_HOME_DIR)
+        self.home_dir            = config.get('home-dir')
         self.install_script      = config.get_file_list('install-script', [DEFAULT_INSTALL_SCRIPT])
         self.mount               = config.get('mount', ['.'])
         self.mount_home_dir      = config.get_file('mount-home-dir', True)
@@ -660,6 +661,9 @@ class Options:
         self.shell               = config.get('shell', DEFAULT_SHELL)
         self.verbose             = int(config.get('verbose', 0))
         self.work_dir            = config.get('work-dir', DEFAULT_WORK_DIR)
+
+        if self.home_dir is None:
+            self.home_dir = DEFAULT_HOME_DIR_PREFIX + self.username
 
 
 class DockerContainer:
