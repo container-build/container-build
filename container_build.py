@@ -239,10 +239,14 @@ def read_packages(packages_path):
 
 def collect_volumes(mount_args, work_dir, recursive):
     volumes = {}
-    for mount_arg_str in mount_args:
-        mount_arg = Path(mount_arg_str)
-        mount_src = mount_arg.resolve()
-        mount_dst = Path(work_dir, mount_arg.name)
+    for mount_arg in mount_args:
+        mount_src_str, *mount_dst_list = mount_arg.split(':', 1)
+        mount_src_path = Path(mount_src_str)
+        mount_src = mount_src_path.resolve()
+        if len(mount_dst_list) == 1:
+            mount_dst = Path(work_dir, mount_dst_list[0])
+        else:
+            mount_dst = Path(work_dir, mount_src_path.name)
         volumes[str(mount_src)] = str(mount_dst)
         if recursive and mount_src.is_dir():
             with os.scandir(mount_src) as subdirs:
@@ -362,8 +366,9 @@ section.'''
     parser.add_argument('--no-mount-home-dir', action='store_const', const=True,
                         help='Suppress mounting a temporary directory as the home directory used in the container.')
     parser.add_argument('-m', '--mount', action='append',
-                        help='Directory to bind mount under the working directory in the container. May be specified'
-                        ' multiple times. Defaults to the current directory.')
+                        help='Directory to bind mount under the working directory in the container. Mount location may'
+                        ' be specified followed by a colon, like \'src:dst\'. May be specified multiple times. Defaults'
+                        ' to the current directory.')
     parser.add_argument('--no-recursive-mount', action='store_const', const=True,
                         help='Suppress recursively mounting symlinks to directories outside their containing mount.')
     parser.add_argument('--docker-passthrough', action='store_const', const=True,
